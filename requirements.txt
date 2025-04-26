@@ -1,0 +1,6 @@
+prometheus-api-client>=0.5.1
+scikit-learn>=1.0.2
+pandas>=1.4.2
+python-dotenv>=0.21.0
+requests>=2.26.0
+joblib>=1.1.0
