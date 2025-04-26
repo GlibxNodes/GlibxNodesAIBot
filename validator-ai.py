@@ -6,7 +6,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.base import BaseEstimator
 from prometheus_api_client import PrometheusConnect
@@ -21,7 +21,6 @@ class SafeModel(BaseEstimator):
         return self
     
     def predict_proba(self, X):
-        # Always return medium risk (50%) if not properly trained
         return np.array([[0.5, 0.5]] * len(X))
 
 class SystemMonitor:
@@ -30,23 +29,28 @@ class SystemMonitor:
         self.prometheus_url = os.getenv('PROMETHEUS_URL', 'http://localhost:9090')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.threshold = 0.7
+        self.threshold = 0.85
+        
+        # Healthy baseline thresholds
+        self.cpu_threshold = 5.0
+        self.mem_threshold = 1.0
         
         # Initialize components
         self.prom = PrometheusConnect(url=self.prometheus_url)
-        
-        # Set model paths with proper permissions handling
         self.models_dir = self._get_writable_dir()
         self.model_path = os.path.join(self.models_dir, 'system_monitor_model.pkl')
         self.model = self._init_model()
         
         self.mitigation_history = []
-        self.feature_names = None  # Track expected feature names
+        self.feature_names = None
+        self.training_data = []
         
         # Timing settings
-        self.mitigation_cooldown = 3600  # 1 hour
-        self.alert_cooldown = 600        # 10 minutes
+        self.mitigation_cooldown = 3600
+        self.alert_cooldown = 600
         self.last_alert_time = 0
+        self.retrain_interval = 86400
+        self.last_retrain = time.time()
         
         # Available metrics
         self.base_metrics = [
@@ -56,13 +60,11 @@ class SystemMonitor:
             'node_network_receive_errs_total'
         ]
         
-        # Initial training
         self._initial_training()
-        
-        print("✅ Initialized System Monitor with metrics:")
+        print("✅ Initialized System Monitor")
         for metric in self.base_metrics:
             print(f"   - {metric}")
-    
+
     def _get_writable_dir(self):
         """Find a writable directory for storing models"""
         candidates = [
@@ -101,38 +103,35 @@ class SystemMonitor:
             max_depth=3,
             random_state=42
         )
-    
+
     def _initial_training(self):
-        """Train model with synthetic data matching exact feature count"""
+        """Train model with synthetic data that includes both classes"""
         try:
             if not hasattr(self.model, 'fit'):
                 return
             
-            # First collect real metrics to determine feature count
             dummy_data = self.collect_metrics()
             dummy_features = self.preprocess_data(dummy_data)
             self.feature_names = list(dummy_features.columns)
             num_features = len(self.feature_names)
             
-            # Generate synthetic data matching exact feature count
-            X = np.random.rand(100, num_features)
-            y = (X[:, 0] > 0.7).astype(int)
+            # Generate balanced synthetic data (50% normal, 50% anomalies)
+            X_normal = np.random.rand(50, num_features) * 0.7  # Normal state
+            X_anomaly = 0.7 + np.random.rand(50, num_features) * 0.3  # Anomalous state
+            X = np.vstack([X_normal, X_anomaly])
+            y = np.array([0]*50 + [1]*50)  # Labels
             
             self.model.fit(X, y)
             print(f"🔧 Initialized model with {num_features} features")
             
-            # Save with atomic write to prevent corruption
             temp_path = self.model_path + ".tmp"
             joblib.dump((self.model, self.feature_names), temp_path)
             os.replace(temp_path, self.model_path)
             
         except Exception as e:
             print(f"⚠️ Initial training failed: {e}")
-            print("📣 Run as root or fix directory permissions:")
-            print(f"  sudo mkdir -p {self.models_dir}")
-            print(f"  sudo chown $USER {self.models_dir}")
             self.model = SafeModel()
-    
+
     def collect_metrics(self):
         """Collect system metrics safely"""
         metrics = {'timestamp': datetime.now().isoformat()}
@@ -150,7 +149,7 @@ class SystemMonitor:
                 print(f"⚠️ Failed to query {metric}: {str(e)}")
         
         return pd.DataFrame([metrics])
-    
+
     def preprocess_data(self, df):
         """Prepare data for model prediction with consistent features"""
         # Convert timestamp
@@ -158,51 +157,36 @@ class SystemMonitor:
         
         # Create rolling features
         for window in [5, 15, 60]:
-            df[f'load_ma_{window}'] = (
-                df['node_load1']
-                .rolling(window, min_periods=1)
-                .mean()
-            )
-            df[f'mem_ma_{window}'] = (
-                df['node_memory_MemAvailable_bytes']
-                .rolling(window, min_periods=1)
-                .mean()
-            )
+            df[f'load_ma_{window}'] = df['node_load1'].rolling(window, min_periods=1).mean()
+            df[f'mem_ma_{window}'] = df['node_memory_MemAvailable_bytes'].rolling(window, min_periods=1).mean()
         
         # Temporal features
         df['hour_sin'] = np.sin(2 * np.pi * df['timestamp'].dt.hour/24)
         df['hour_cos'] = np.cos(2 * np.pi * df['timestamp'].dt.hour/24)
         
         # Interaction terms
-        df['cpu_mem_ratio'] = (
-            df['node_load1'] / 
-            (df['node_memory_MemAvailable_bytes'] / 1e9 + 1e-6)  # Normalize
-        )
+        df['cpu_mem_ratio'] = df['node_load1'] / (df['node_memory_MemAvailable_bytes'] / 1e9 + 1e-6)
         
         # Handle missing values
         df = df.ffill().bfill().fillna(0)
         
-        # Ensure consistent features if we have a trained model
+        # Ensure consistent features
         if self.feature_names is not None:
-            # Add any missing features with default values
             for feature in self.feature_names:
                 if feature not in df.columns:
                     df[feature] = 0.0
-            # Select only the expected features in the right order
             df = df[self.feature_names]
         
         return df.drop(columns=['timestamp'], errors='ignore')
-    
+
     def predict_risk(self, features):
         """Safe prediction with feature validation"""
         try:
-            # Convert to numpy array to avoid feature name warnings
             features_array = features.values
             
             if not hasattr(self.model, 'predict_proba'):
                 return {'probability': 0.5, 'risk_level': 'medium'}
             
-            # Verify feature count matches
             if features_array.shape[1] != self.model.n_features_in_:
                 print(f"⚠️ Feature mismatch: Got {features_array.shape[1]}, expected {self.model.n_features_in_}")
                 return {'probability': 0.5, 'risk_level': 'medium'}
@@ -215,23 +199,28 @@ class SystemMonitor:
         except Exception as e:
             print(f"⚠️ Prediction failed: {str(e)}")
             return {'probability': 0.5, 'risk_level': 'medium'}
-    
+
     def analyze_anomaly(self, features):
-        """Basic anomaly analysis"""
+        """Detect actual system anomalies"""
         analysis = {
             'primary_issue': None,
-            'confidence': 0.0
+            'confidence': 0.0,
+            'metrics': {
+                'cpu_load': features['node_load1'].values[0],
+                'mem_available_gb': features['node_memory_MemAvailable_bytes'].values[0] / 1e9,
+                'disk_io': features['node_disk_io_time_seconds_total'].values[0],
+                'network_errors': features['node_network_receive_errs_total'].values[0]
+            }
         }
         
-        # CPU analysis
-        cpu_load = features['node_load1'].values[0]
-        if cpu_load > 5.0:
-            analysis['primary_issue'] = f"High CPU load ({cpu_load:.1f})"
-            analysis['confidence'] = min(90 + (cpu_load-5)*10, 99)
+        cpu_load = analysis['metrics']['cpu_load']
+        mem_avail = analysis['metrics']['mem_available_gb']
         
-        # Memory analysis
-        mem_avail = features['node_memory_MemAvailable_bytes'].values[0] / 1e9  # Convert to GB
-        if mem_avail < 1.0:
+        if cpu_load > self.cpu_threshold:
+            analysis['primary_issue'] = f"High CPU load ({cpu_load:.1f})"
+            analysis['confidence'] = min(90 + (cpu_load-self.cpu_threshold)*10, 99)
+        
+        if mem_avail < self.mem_threshold:
             issue = f"Low memory available ({mem_avail:.1f}GB)"
             if analysis['primary_issue']:
                 analysis['secondary_issue'] = issue
@@ -239,26 +228,29 @@ class SystemMonitor:
                 analysis['primary_issue'] = issue
                 analysis['confidence'] = max(analysis['confidence'], 85.0)
         
+        if analysis['primary_issue'] is None and self.model.__class__.__name__ != 'SafeModel':
+            print("⚠️ Model prediction doesn't match actual system state")
+            self._retrain_model()
+        
         return analysis
-    
+
+    def should_alert(self, prediction, analysis):
+        """Determine if alert should be sent"""
+        return prediction['risk_level'] == 'high' and analysis['primary_issue'] is not None
+
     def safe_mitigation(self, features):
         """Non-disruptive system optimizations"""
         actions = []
         
-        # Check cooldown
-        if self.mitigation_history:
-            last_action = self.mitigation_history[-1]
-            if time.time() - last_action['time'] < self.mitigation_cooldown:
-                return actions
+        if self.mitigation_history and time.time() - self.mitigation_history[-1]['time'] < self.mitigation_cooldown:
+            return actions
         
         try:
-            # Memory optimization
             mem_avail = features['node_memory_MemAvailable_bytes'].values[0]
-            if mem_avail < 1e9:  # < 1GB
+            if mem_avail < 1e9:
                 os.system("sync && echo 3 > /proc/sys/vm/drop_caches")
                 actions.append("Cleared page cache")
             
-            # CPU optimization
             cpu_load = features['node_load1'].values[0]
             if cpu_load > 5.0:
                 os.system("pkill -f low_priority_process")
@@ -275,7 +267,7 @@ class SystemMonitor:
             print(f"⚠️ Mitigation failed: {str(e)}")
         
         return actions
-    
+
     def generate_recommendations(self, analysis):
         """Generate recommendations based on analysis"""
         recs = []
@@ -293,77 +285,97 @@ class SystemMonitor:
             ])
         
         return recs or ["Check system logs for errors"]
-    
+
     def send_alert(self, message, metadata=None):
         """Send alert with rate limiting"""
         try:
             current_time = time.time()
             
-            # Rate limiting
             if current_time - self.last_alert_time < self.alert_cooldown:
                 print("🛑 Alert cooldown active")
                 return
             
-            # Format message
-            alert_text = f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            alert_text += f"🚨 {message}"
+            alert_text = f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n🚨 {message}"
             
             if metadata:
-                alert_text += "\n\n🔍 Details:\n"
-                alert_text += json.dumps(metadata, indent=2)
+                alert_text += "\n\n🔍 Details:\n" + json.dumps(metadata, indent=2)
             
-            # Telegram notification
             if self.telegram_token and self.telegram_chat_id:
                 import requests
-                url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-                payload = {
-                    'chat_id': self.telegram_chat_id,
-                    'text': alert_text,
-                    'parse_mode': 'Markdown'
-                }
-                requests.post(url, json=payload)
+                requests.post(
+                    f"https://api.telegram.org/bot{self.telegram_token}/sendMessage",
+                    json={
+                        'chat_id': self.telegram_chat_id,
+                        'text': alert_text,
+                        'parse_mode': 'Markdown'
+                    }
+                )
             
-            # Console fallback
             print(f"📢 {alert_text}")
-            
-            # Record alert
             self.last_alert_time = current_time
             
         except Exception as e:
             print(f"⚠️ Alert failed: {str(e)}")
-    
+
+    def _retrain_model(self):
+        """Retrain model with collected data"""
+        if len(self.training_data) < 100:
+            print("⚠️ Not enough data for retraining")
+            return
+            
+        try:
+            df = pd.concat(self.training_data[-100:])
+            features = self.preprocess_data(df)
+            
+            y = np.where(
+                (features['node_load1'] > self.cpu_threshold) | 
+                (features['node_memory_MemAvailable_bytes']/1e9 < self.mem_threshold),
+                1, 0
+            )
+            
+            if len(np.unique(y)) >= 2:
+                self.model.fit(features.values, y)
+                temp_path = self.model_path + ".tmp"
+                joblib.dump((self.model, self.feature_names), temp_path)
+                os.replace(temp_path, self.model_path)
+                print("✅ Model retrained successfully")
+            else:
+                print("⚠️ Not enough class diversity for retraining")
+                
+        except Exception as e:
+            print(f"⚠️ Retraining failed: {str(e)}")
+
     def monitor_loop(self):
         """Main monitoring loop"""
         print("🚀 Starting monitoring loop (60s intervals)")
         
         while True:
             try:
-                # Data collection
                 raw_data = self.collect_metrics()
+                self.training_data.append(raw_data)
                 features = self.preprocess_data(raw_data)
-                
-                # Prediction
                 prediction = self.predict_risk(features)
-                print(f"📊 System status: {prediction['risk_level']} ({prediction['probability']:.2f})")
+                analysis = self.analyze_anomaly(features)
                 
-                # High risk handling
-                if prediction['risk_level'] == 'high':
-                    analysis = self.analyze_anomaly(features)
+                if time.time() - self.last_retrain > self.retrain_interval:
+                    self._retrain_model()
+                    self.last_retrain = time.time()
+                
+                print(f"📊 Status: {prediction['risk_level']} ({prediction['probability']:.2f}) | "
+                      f"CPU: {analysis['metrics']['cpu_load']:.1f} | "
+                      f"Mem: {analysis['metrics']['mem_available_gb']:.1f}GB")
+                
+                if self.should_alert(prediction, analysis):
                     recommendations = self.generate_recommendations(analysis)
                     actions = self.safe_mitigation(features)
                     
                     self.send_alert(
-                        "High system load detected",
+                        "⚠️ System anomaly detected",
                         {
                             'analysis': analysis,
                             'actions_taken': actions,
                             'recommendations': recommendations,
-                            'current_metrics': {
-                                'cpu_load': features['node_load1'].values[0],
-                                'mem_available_gb': features['node_memory_MemAvailable_bytes'].values[0] / 1e9,
-                                'disk_io': features['node_disk_io_time_seconds_total'].values[0],
-                                'network_errors': features['node_network_receive_errs_total'].values[0]
-                            }
+                            'prediction_confidence': prediction['probability']
                         }
                     )
                 
