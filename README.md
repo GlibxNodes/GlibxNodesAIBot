@@ -2,6 +2,8 @@
 
 An AI-powered self-monitoring agent designed to predict, analyze, and mitigate risks that could cause missed blocks for validator nodes.
 
+---
+
 ## 📋 What This Bot Does
 
 - Collects live system metrics (CPU load, memory, disk IO, network errors) using Prometheus  
@@ -12,93 +14,126 @@ An AI-powered self-monitoring agent designed to predict, analyze, and mitigate r
 - Retrains itself over time based on collected real-world data  
 - Runs as a lightweight daemon without interfering with your validator performance  
 
+---
+
 ## 🚀 How to Run It
 
 ### 1. Clone the repository
+
 ```bash
 git clone https://github.com/GlibxNodes/GlibxNodesAIBot.git
 cd GlibxNodesAIBot
 ```
-2. Install Python Dependencies
+
+### 2. Install Python Dependencies
+
 ```bash
 pip install -r requirements.txt
-#(requirements.txt contains: prometheus-api-client, scikit-learn, pandas, python-dotenv, requests, joblib)
 ```
-3. Create a .env file
-Create .env in the project root with:
-### env
-```PROMETHEUS_URL=http://localhost:9090
+
+> _requirements.txt contains:_  
+> `prometheus-api-client`, `scikit-learn`, `pandas`, `python-dotenv`, `requests`, `joblib`
+
+### 3. Create a `.env` file
+
+Create a `.env` file in the root directory:
+
+```bash
+PROMETHEUS_URL=http://localhost:9090
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token
 TELEGRAM_CHAT_ID=your-chat-id
 ```
-📌 Note:
 
-Get Telegram Bot Token from BotFather
+📌 **Notes**:
+- Get your Telegram Bot Token from [@BotFather](https://t.me/BotFather)
+- Find your Chat ID from [@userinfobot](https://t.me/userinfobot)
 
-Find your Chat ID using @userinfobot
+---
 
-4. Run the Bot
-bash
+### 4. Run the Bot
+
+To run manually:
+
+```bash
 python3 validator-ai.py
-OR as a systemd service:
+```
+
+Or run as a systemd service:
 
 ```bash
 sudo systemctl start validator-ai
-sudo systemctl enable validator-ai 
+sudo systemctl enable validator-ai
 ```
-⚙️ Monitored Metrics
-Metric	Purpose
-node_load1	CPU system load
-node_memory_MemAvailable_bytes	Free memory
-node_disk_io_time_seconds_total	Disk I/O pressure
-node_network_receive_errs_total	Network errors
-🔥 Alert Conditions
-CPU load > 5.0 (sustained)
 
-Available memory < 1GB
+---
 
-Disk I/O overload
+## ⚙️ Monitored Metrics
 
-Rising network errors
+| Metric                                | Purpose           |
+|---------------------------------------|-------------------|
+| `node_load1`                          | CPU system load   |
+| `node_memory_MemAvailable_bytes`      | Free memory       |
+| `node_disk_io_time_seconds_total`     | Disk I/O pressure |
+| `node_network_receive_errs_total`     | Network errors    |
 
-AI-detected anomalies
+---
 
-🛡️ Automatic Mitigations
-Memory cache clearing (sync; echo 3 > /proc/sys/vm/drop_caches)
+## 🔥 Alert Conditions
 
-Process priority adjustment
+- CPU load > 5.0 (sustained)
+- Available memory < 1GB
+- Disk I/O overload
+- Rising network errors
+- AI-detected anomalies
 
-Zombie process cleanup
+---
 
-💬 Telegram Alerts Include
-✅ Current metrics snapshot
-⚠️ Detected issue
-🛠️ Suggested actions
-🔧 Mitigations applied (if any)
+## 🛡️ Automatic Mitigations
 
-❗ Important Notes
-* Read-only operations only (never force-restarts validator)
+- Memory cache clearing (`sync; echo 3 > /proc/sys/vm/drop_caches`)
+- Process priority adjustment
+- Zombie process cleanup (future planned)
 
-* Minimal footprint (~30MB RAM)
+---
 
-* Self-learning model improves over time
+## 💬 Telegram Alerts Include
 
-* Safe fallback mode always active
+- ✅ Current system metrics snapshot  
+- ⚠️ Detected primary issue  
+- 🛠️ Suggested recommended actions  
+- 🔧 Mitigations applied (if any)  
 
-📈 Roadmap
+---
+
+## ❗ Important Notes
+
+- Only safe, read-only system interventions (no validator force restarts)  
+- Minimal resource usage (~30MB RAM)  
+- Self-learning model that improves over time  
+- Always fallback to safe prediction mode if needed  
+
+---
+
+## 📈 Roadmap
+
+```mermaid
+flowchart TD
+    A[Start Monitoring] --> B{Risk Detected?}
+    B -- No --> A
+    B -- Yes --> C{Real Anomaly?}
+    C -- No --> A
+    C -- Yes --> D[Send Telegram Alert]
+    D --> E{Can Auto-Mitigation Help?}
+    E -- No --> A
+    E -- Yes --> F[Run Safe Mitigation]
+    F --> A
+```
 
 ![flow](https://github.com/user-attachments/assets/2e126a8f-a444-41c8-b42e-b411f10c38ec)
 
-🏁 Stay online. Slash downtime. Let AI watch your validator.
+---
 
+## 🏁 Stay online. Slash downtime. Let AI watch your validator.
 
-This version includes:
-1. Proper Markdown syntax throughout
-2. Consistent spacing and formatting
-3. Improved visual hierarchy with emoji headers
-4. Added Mermaid diagram for roadmap visualization
-5. Better table formatting
-6. Clearer code block separation
-7. More organized note sections
 
 
